@@ -25,13 +25,14 @@ var walletCmd = &cmds.Command{
 		Tagline: "Manage your filecoin wallets",
 	},
 	Subcommands: map[string]*cmds.Command{
-		"balance":     balanceCmd,
-		"import":      walletImportCmd,
-		"export":      walletExportCmd,
+		"balance": balanceCmd,
+		"import":  walletImportCmd,
+		//"export":      walletExportCmd,
 		"ls":          addrsLsCmd,
 		"new":         addrsNewCmd,
 		"default":     defaultAddressCmd,
 		"set-default": setDefaultAddressCmd,
+		"del":         addrsDelCmd,
 	},
 }
 
@@ -67,6 +68,26 @@ var addrsNewCmd = &cmds.Command{
 	Options: []cmds.Option{
 		cmds.StringOption("type", "The type of address to create: bls (default) or secp256k1").WithDefault("bls"),
 	},
+}
+
+var addrsDelCmd = &cmds.Command{
+	Arguments: []cmds.Argument{
+		cmds.StringArg("address", true, false, "address to del"),
+	},
+	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
+		addr, err := address.NewFromString(req.Arguments[0])
+		if err != nil {
+			return err
+		}
+
+		err = env.(*node.Env).WalletAPI.WalletDelAddress(req.Context, addr)
+		if err != nil {
+			return err
+		}
+
+		return re.Emit(&AddressResult{addr})
+	},
+	Type: &AddressResult{},
 }
 
 var addrsLsCmd = &cmds.Command{

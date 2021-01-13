@@ -85,6 +85,10 @@ func (walletAPI *WalletAPI) WalletNewAddress(protocol address.Protocol) (address
 	return wallet.NewAddress(walletAPI.walletModule.Wallet, protocol)
 }
 
+func (walletAPI *WalletAPI) WalletDelAddress(ctx context.Context, addr address.Address) error {
+	return walletAPI.walletModule.Wallet.WalletDelete(ctx, addr)
+}
+
 // WalletImport adds a given set of KeyInfos to the walletModule
 func (walletAPI *WalletAPI) WalletImport(key *crypto.KeyInfo) (address.Address, error) {
 	addrs, err := walletAPI.walletModule.Wallet.Import(key)

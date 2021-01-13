@@ -192,6 +192,9 @@ type MessagePool struct {
 	gp        gasPredictor
 	ap        actorProvider
 	GetMaxFee DefaultMaxFeeFunc
+
+	gcfgLk sync.Mutex
+	gcfg   *MpoolGasConfig
 }
 
 type msgSet struct {
@@ -385,6 +388,11 @@ func New(api Provider, ds repo.Datastore, forkParams *config.ForkUpgradeConfig, 
 		return nil, xerrors.Errorf("error loading mpool config: %v", err)
 	}
 
+	gcfg, err := loadGasConfig(ds)
+	if err != nil {
+		return nil, xerrors.Errorf("error loading mpool gas config: %w", err)
+	}
+
 	if j == nil {
 		j = journal.NilJournal()
 	}
@@ -414,6 +422,7 @@ func New(api Provider, ds repo.Datastore, forkParams *config.ForkUpgradeConfig, 
 			evtTypeMpoolRemove: j.RegisterEventType("mpool", "remove"),
 			evtTypeMpoolRepub:  j.RegisterEventType("mpool", "repub"),
 		},
+		gcfg:    gcfg,
 		journal: j,
 
 		gasPriceSchedule: gas.NewPricesSchedule(forkParams),
@@ -486,7 +495,7 @@ func (mp *MessagePool) PublishMsgForWallet(addr address.Address) error {
 
 	log.Infof("mpool has [%v] msg for [%s], will republish ...", len(out), addr.String())
 
-	// 开始广播消息
+	// ??????
 	for _, msg := range out {
 		msgb, err := msg.Serialize()
 		if err != nil {

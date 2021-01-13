@@ -47,6 +47,14 @@ func (a *MessagePoolAPI) MpoolSetConfig(ctx context.Context, cfg *messagepool.Mp
 	return a.mp.MPool.SetConfig(cfg)
 }
 
+func (a *MessagePoolAPI) MpoolGetGasConfig(context.Context) (*messagepool.MpoolGasConfig, error) {
+	return a.mp.MPool.GetGasConfig(), nil
+}
+
+func (a *MessagePoolAPI) MpoolSetGasConfig(ctx context.Context, cfg *messagepool.MpoolGasConfig) error {
+	return a.mp.MPool.SetGasConfig(cfg)
+}
+
 func (a *MessagePoolAPI) MpoolSelect(ctx context.Context, tsk block.TipSetKey, ticketQuality float64) ([]*types.SignedMessage, error) {
 	ts, err := a.mp.chain.API().ChainGetTipSet(tsk)
 	if err != nil {
