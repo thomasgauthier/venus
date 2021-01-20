@@ -37,7 +37,7 @@ require (
 	github.com/filecoin-project/go-storedcounter v0.0.0-20200421200003-1c99c62e8a5b
 	github.com/filecoin-project/specs-actors v0.9.13
 	github.com/filecoin-project/specs-actors/v2 v2.3.4
-	github.com/filecoin-project/specs-actors/v3 v3.0.1-0.20210122191213-c7ea99141c44
+	github.com/filecoin-project/specs-actors/v3 v3.0.1-0.20210127195111-89c94ebeb753
 	github.com/filecoin-project/test-vectors/schema v0.0.5
 	github.com/gbrlsnchs/jwt/v3 v3.0.0
 	github.com/go-errors/errors v1.0.1
