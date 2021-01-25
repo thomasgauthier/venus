@@ -105,17 +105,14 @@ func (bv *BlockValidator) ValidateBlockHeader(ctx context.Context, blk *block.Bl
 }
 
 func (bv *BlockValidator) ValidateFullBlock(ctx context.Context, blk *block.Block) error {
-	if val, ok := bv.validateBlockCache.Get(blk.Cid()); ok {
-		if val == nil {
-			return nil
-		} else {
-			return val.(error)
-		}
-	} else {
-		err := bv.validateBlock(ctx, blk, true)
-		bv.validateBlockCache.Add(blk.Cid(), err)
-		return err
+	if _, ok := bv.validateBlockCache.Get(blk.Cid()); ok {
+		return nil
 	}
+	err := bv.validateBlock(ctx, blk, true)
+	if err == nil {
+		bv.validateBlockCache.Add(blk.Cid(), struct{}{})
+	}
+	return err
 }
 
 func (bv *BlockValidator) validateBlock(ctx context.Context, blk *block.Block, includeMsg bool) error {
@@ -590,22 +587,15 @@ func (bv *BlockValidator) VerifyWinningPoStProof(ctx context.Context, nv network
 
 // TODO: We should extract this somewhere else and make the message pool and miner use the same logic
 func (bv *BlockValidator) checkBlockMessages(ctx context.Context, sigValidator *appstate.SignatureValidator, blk *block.Block, baseTs *block.TipSet) (err error) {
-	if val, ok := bv.msgCache.Get(blk.Cid()); ok {
-		if val == nil {
-			return nil
-		} else {
-			return val.(error)
-		}
+	if _, ok := bv.msgCache.Get(blk.Cid()); ok {
+		return nil
 	}
-	//set cache
-	defer func() {
-		bv.msgCache.Add(blk.Cid(), err)
-	}()
 
 	blksecpMsgs, blkblsMsgs, err := bv.messageStore.LoadMetaMessages(ctx, blk.Messages)
 	if err != nil {
 		return xerrors.Errorf("failed loading message list %s for block %s %v", blk.Messages, blk.Cid(), err)
 	}
+
 	{
 		// Verify that the BLS signature aggregate is correct
 		if err := sigValidator.ValidateBLSMessageAggregate(ctx, blkblsMsgs, blk.BLSAggregate); err != nil {
@@ -714,7 +704,7 @@ func (bv *BlockValidator) checkBlockMessages(ctx context.Context, sigValidator *
 	if blk.Messages != b.Cid() {
 		return fmt.Errorf("messages didnt match message root in header")
 	}
-
+	bv.msgCache.Add(blk.Cid(), struct{}{})
 	return nil
 }
 
