@@ -105,6 +105,11 @@ func (bv *BlockValidator) ValidateBlockHeader(ctx context.Context, blk *block.Bl
 }
 
 func (bv *BlockValidator) ValidateFullBlock(ctx context.Context, blk *block.Block) error {
+	validationStart := time.Now()
+	defer func() {
+		logExpect.Infow("block validation", "Cid", blk.Cid(), "took", time.Since(validationStart), "height", blk.Height, "age", time.Since(time.Unix(int64(blk.Timestamp), 0)), "Err", err)
+	}()
+
 	if _, ok := bv.validateBlockCache.Get(blk.Cid()); ok {
 		return nil
 	}
