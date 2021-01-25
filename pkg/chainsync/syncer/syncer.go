@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"sync"
 	"time"
 
@@ -14,7 +15,6 @@ import (
 	"github.com/ipfs/go-cid"
 	blockstore "github.com/ipfs/go-ipfs-blockstore"
 	logging "github.com/ipfs/go-log/v2"
-	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/log"
 	"go.opencensus.io/trace"
@@ -47,49 +47,41 @@ import (
 // tipset in the incoming chain, and assumptions regarding the existence of
 // grandparent state in the bsstore.
 
-var ErrForkTooLong = fmt.Errorf("fork longer than threshold")
+var (
+	// ErrForkTooLong is return when the syncing chain has fork with local
+	ErrForkTooLong = fmt.Errorf("fork longer than threshold")
+	// ErrChainHasBadTipSet is returned when the syncer traverses a chain with a cached bad tipset.
+	ErrChainHasBadTipSet = errors.New("input chain contains a cached bad tipset")
+	// ErrNewChainTooLong is returned when processing a fork that split off from the main chain too many blocks ago.
+	ErrNewChainTooLong = errors.New("input chain forked from best chain past finality limit")
+	// ErrUnexpectedStoreState indicates that the syncer's chain bsstore is violating expected invariants.
+	ErrUnexpectedStoreState = errors.New("the chain bsstore is in an unexpected state")
 
-type Syncer struct {
-	// fetcher is the networked block fetching service for fetching blocks
-	// and messages.
-	fetcher        Fetcher
-	exchangeClient exchange.Client
-	// BadTipSetCache is used to filter out collections of invalid blocks.
-	badTipSets *syncTypes.BadTipSetCache
+	logSyncer    = logging.Logger("chainsync.syncer")
+	syncOneTimer *metrics.Float64Timer
+	reorgCnt     *metrics.Int64Counter
+)
 
-	// Evaluates tipset messages and stores the resulting states.
-	fullValidator FullBlockValidator
-	// Validates headers and message structure
-	blockValidator BlockValidator
-	// Selects the heaviest of two chains
-	chainSelector ChainSelector
-	// Provides and stores validated tipsets and their state roots.
-	chainStore ChainReaderWriter
-	// Provides message collections given cids
-	messageProvider messageStore
-
-	clock    clock.Clock
-	headLock sync.Mutex
-
-	// faultDetector is used to manage information about potential consensus faults
-	faultDetector
-
-	bsstore    blockstore.Blockstore
-	checkPoint block.TipSetKey
-
-	fork fork.IFork
+func init() {
+	syncOneTimer = metrics.NewTimerMs("syncer/sync_one", "Duration of single tipset validation in milliseconds")
+	reorgCnt = metrics.NewInt64Counter("chain/reorg_count", "The number of reorgs that have occurred.")
 }
 
-// Fetcher defines an interface that may be used to fetch data from the network.
-type Fetcher interface {
-	// FetchTipSets will only fetch TipSets that evaluate to `false` when passed to `done`,
-	// this includes the provided `ts`. The TipSet that evaluates to true when
-	// passed to `done` will be in the returned slice. The returns slice of TipSets is in Traversal order.
-	FetchTipSets(context.Context, block.TipSetKey, peer.ID, func(*block.TipSet) (bool, error)) ([]*block.TipSet, error)
+// StateProcessor does semantic validation on fullblocks.
+type StateProcessor interface {
+	// RunStateTransition returns the state root CID resulting from applying the input ts to the
+	// prior `stateRoot`.  It returns an error if the transition is invalid.
+	RunStateTransition(ctx context.Context, ts *block.TipSet, parentStateRoot cid.Cid) (root cid.Cid, receipts []types.MessageReceipt, err error)
+}
 
-	// FetchTipSetHeaders will fetch only the headers of tipset blocks.
-	// Returned slice in reversal order
-	FetchTipSetHeaders(context.Context, block.TipSetKey, peer.ID, func(*block.TipSet) (bool, error)) ([]*block.TipSet, error)
+type BlockValidator interface {
+	ValidateFullBlock(ctx context.Context, blk *block.Block) error
+}
+
+// faultDetector tracks data for detecting consensus faults and emits faults
+// upon detection.
+type faultDetector interface {
+	CheckBlock(b *block.Block, p *block.TipSet) error
 }
 
 // ChainReaderWriter reads and writes the chain bsstore.
@@ -123,71 +115,50 @@ type ChainSelector interface {
 	Weight(ctx context.Context, ts *block.TipSet) (big.Int, error)
 }
 
-// BlockValidator does semanitc validation on headers
-type BlockValidator interface {
-	// ValidateHeaderSemantic validates conditions on a block header that can be
-	// checked with the parent header but not parent state.
-	ValidateHeaderSemantic(context.Context, *block.Block, *block.TipSet) error
-	// ValidateMessagesSemantic validates a block's messages against parent state without applying the messages
-	ValidateMessagesSemantic(context.Context, *block.Block, *block.TipSet) error
+type Syncer struct {
+	exchangeClient exchange.Client
+	// BadTipSetCache is used to filter out collections of invalid blocks.
+	badTipSets *syncTypes.BadTipSetCache
+
+	// Evaluates tipset messages and stores the resulting states.
+	stateProcessor StateProcessor
+	// Validates headers and message structure
+	blockValidator BlockValidator
+	// Selects the heaviest of two chains
+	chainSelector ChainSelector
+	// Provides and stores validated tipsets and their state roots.
+	chainStore ChainReaderWriter
+	// Provides message collections given cids
+	messageProvider messageStore
+
+	clock    clock.Clock
+	headLock sync.Mutex
+
+	// faultDetector is used to manage information about potential consensus faults
+	faultDetector
+
+	bsstore    blockstore.Blockstore
+	checkPoint block.TipSetKey
+
+	fork fork.IFork
 }
-
-// FullBlockValidator does semantic validation on fullblocks.
-type FullBlockValidator interface {
-	// RunStateTransition returns the state root CID resulting from applying the input ts to the
-	// prior `stateRoot`.  It returns an error if the transition is invalid.
-	RunStateTransition(ctx context.Context, ts *block.TipSet, parentStateRoot cid.Cid) (root cid.Cid, receipts []types.MessageReceipt, err error)
-	// Todo add by force
-	ValidateMining(ctx context.Context, parent, ts *block.TipSet, parentWeight big.Int, parentReceiptRoot cid.Cid) error
-}
-
-// faultDetector tracks data for detecting consensus faults and emits faults
-// upon detection.
-type faultDetector interface {
-	CheckBlock(b *block.Block, p *block.TipSet) error
-}
-
-var reorgCnt *metrics.Int64Counter
-
-func init() {
-	reorgCnt = metrics.NewInt64Counter("chain/reorg_count", "The number of reorgs that have occurred.")
-}
-
-var (
-	// ErrChainHasBadTipSet is returned when the syncer traverses a chain with a cached bad tipset.
-	ErrChainHasBadTipSet = errors.New("input chain contains a cached bad tipset")
-	// ErrNewChainTooLong is returned when processing a fork that split off from the main chain too many blocks ago.
-	ErrNewChainTooLong = errors.New("input chain forked from best chain past finality limit")
-	// ErrUnexpectedStoreState indicates that the syncer's chain bsstore is violating expected invariants.
-	ErrUnexpectedStoreState = errors.New("the chain bsstore is in an unexpected state")
-)
-
-var syncOneTimer *metrics.Float64Timer
-
-func init() {
-	syncOneTimer = metrics.NewTimerMs("syncer/sync_one", "Duration of single tipset validation in milliseconds")
-}
-
-var logSyncer = logging.Logger("chainsync.syncer")
 
 // NewSyncer constructs a Syncer ready for use.  The chain reader must have a
 // head tipset to initialize the staging field.
-func NewSyncer(fv FullBlockValidator,
+func NewSyncer(fv StateProcessor,
 	hv BlockValidator,
 	cs ChainSelector,
 	s ChainReaderWriter,
 	m messageStore,
 	bsstore blockstore.Blockstore,
-	f Fetcher,
 	exchangeClient exchange.Client,
 	c clock.Clock,
 	fd faultDetector,
 	fork fork.IFork) (*Syncer, error) {
 	return &Syncer{
-		fetcher:         f,
 		exchangeClient:  exchangeClient,
 		badTipSets:      syncTypes.NewBadTipSetCache(),
-		fullValidator:   fv,
+		stateProcessor:  fv,
 		blockValidator:  hv,
 		chainSelector:   cs,
 		bsstore:         bsstore,
@@ -224,19 +195,15 @@ func (syncer *Syncer) syncOne(ctx context.Context, parent, next *block.TipSet) e
 	}
 
 	if !parent.Key().Equals(syncer.checkPoint) {
-		//skip check if just checkpoint
-		// validate pre block
-		parentWeight, err := syncer.chainSelector.Weight(ctx, parent)
-		if err != nil {
-			return xerrors.Errorf("calc parent weight failed %w", err)
+		var wg errgroup.Group
+		for i := 0; i < next.Len(); i++ {
+			blk := next.At(i)
+			wg.Go(func() error {
+				// Fetch the URL.
+				return syncer.blockValidator.ValidateFullBlock(ctx, blk)
+			})
 		}
-
-		parentReceiptRoot, err := syncer.chainStore.GetTipSetReceiptsRoot(parent)
-		if err != nil {
-			return xerrors.Errorf("get parent tipset receipt failed %w", err)
-		}
-
-		err = syncer.fullValidator.ValidateMining(ctx, parent, next, parentWeight, parentReceiptRoot)
+		err = wg.Wait()
 		if err != nil {
 			return xerrors.Errorf("validate mining failed %w", err)
 		}
@@ -244,7 +211,7 @@ func (syncer *Syncer) syncOne(ctx context.Context, parent, next *block.TipSet) e
 	// Run a state transition to validate the tipset and compute
 	// a new state to add to the bsstore.
 	toProcessTime := time.Now()
-	root, receipts, err := syncer.fullValidator.RunStateTransition(ctx, next, parentStateRoot)
+	root, receipts, err := syncer.stateProcessor.RunStateTransition(ctx, next, parentStateRoot)
 	if err != nil {
 		return xerrors.Errorf("calc current tipset %s state failed %w", next.Key().String(), err)
 	}
