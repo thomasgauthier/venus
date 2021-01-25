@@ -61,10 +61,32 @@ type BlockValidator struct {
 	gasPirceSchedule *gas.PricesSchedule
 }
 
-func NewBlockValidator(tv TicketValidator, bstore blockstore.Blockstore, messageStore *chain.MessageStore, drand beacon.Schedule, cstore cbor.IpldStore,
-	proofVerifier ProofVerifier, state StateViewer, chainState chainReader,
-	chainSelector *ChainSelector, fork fork.IFork, config *config.NetworkParamsConfig) *BlockValidator {
-	return &BlockValidator{tv: tv, bstore: bstore, messageStore: messageStore, drand: drand, cstore: cstore, proofVerifier: proofVerifier, state: state, chainState: chainState, chainSelector: chainSelector, fork: fork, config: config}
+func NewBlockValidator(tv TicketValidator,
+	bstore blockstore.Blockstore,
+	messageStore *chain.MessageStore,
+	drand beacon.Schedule,
+	cstore cbor.IpldStore,
+	proofVerifier ProofVerifier,
+	state StateViewer,
+	chainState chainReader,
+	chainSelector *ChainSelector,
+	fork fork.IFork,
+	config *config.NetworkParamsConfig,
+	gasPirceSchedule *gas.PricesSchedule) *BlockValidator {
+	return &BlockValidator{
+		tv:               tv,
+		bstore:           bstore,
+		messageStore:     messageStore,
+		drand:            drand,
+		cstore:           cstore,
+		proofVerifier:    proofVerifier,
+		state:            state,
+		chainState:       chainState,
+		chainSelector:    chainSelector,
+		fork:             fork,
+		config:           config,
+		gasPirceSchedule: gasPirceSchedule,
+	}
 }
 
 func (bv *BlockValidator) ValidateBlockHeader(ctx context.Context, blk *block.Block) error {

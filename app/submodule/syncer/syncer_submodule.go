@@ -95,8 +95,19 @@ func NewSyncerSubmodule(ctx context.Context,
 	stateViewer := consensus.AsDefaultStateViewer(state.NewViewer(blockstore.CborStore))
 	nodeChainSelector := consensus.NewChainSelector(blockstore.CborStore, &stateViewer)
 
-	blkValid := consensus.NewBlockValidator(tickets, blockstore.Blockstore, chn.MessageStore, chn.Drand, blockstore.CborStore,
-		postVerifier, &stateViewer, chn.ChainReader, nodeChainSelector, chn.Fork, config.Repo().Config().NetworkParams)
+	blkValid := consensus.NewBlockValidator(tickets,
+		blockstore.Blockstore,
+		chn.MessageStore,
+		chn.Drand,
+		blockstore.CborStore,
+		postVerifier,
+		&stateViewer,
+		chn.ChainReader,
+		nodeChainSelector,
+		chn.Fork,
+		config.Repo().Config().NetworkParams,
+		gasPriceSchedule,
+	)
 	// register block validation on pubsub
 	btv := blocksub.NewBlockTopicValidator(blkValid)
 	if err := network.Pubsub.RegisterTopicValidator(btv.Topic(network.NetworkName), btv.Validator(), btv.Opts()...); err != nil {
