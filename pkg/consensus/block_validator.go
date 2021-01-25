@@ -29,6 +29,7 @@ import (
 	"github.com/filecoin-project/venus/pkg/vm/gas"
 	"github.com/filecoin-project/venus/pkg/vm/state"
 	"github.com/hashicorp/go-multierror"
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/ipfs/go-cid"
 	blockstore "github.com/ipfs/go-ipfs-blockstore"
 	cbor "github.com/ipfs/go-ipld-cbor"
@@ -59,6 +60,10 @@ type BlockValidator struct {
 	fork             fork.IFork
 	config           *config.NetworkParamsConfig
 	gasPirceSchedule *gas.PricesSchedule
+
+	validateBlockCache *lru.ARCCache
+	blsSigCache        *lru.ARCCache
+	msgCache           *lru.ARCCache
 }
 
 func NewBlockValidator(tv TicketValidator,
@@ -73,19 +78,25 @@ func NewBlockValidator(tv TicketValidator,
 	fork fork.IFork,
 	config *config.NetworkParamsConfig,
 	gasPirceSchedule *gas.PricesSchedule) *BlockValidator {
+	validateBlockCache, _ := lru.NewARC(2048)
+	blsSigCache, _ := lru.NewARC(2048)
+	msgCache, _ := lru.NewARC(2048)
 	return &BlockValidator{
-		tv:               tv,
-		bstore:           bstore,
-		messageStore:     messageStore,
-		drand:            drand,
-		cstore:           cstore,
-		proofVerifier:    proofVerifier,
-		state:            state,
-		chainState:       chainState,
-		chainSelector:    chainSelector,
-		fork:             fork,
-		config:           config,
-		gasPirceSchedule: gasPirceSchedule,
+		tv:                 tv,
+		bstore:             bstore,
+		messageStore:       messageStore,
+		drand:              drand,
+		cstore:             cstore,
+		proofVerifier:      proofVerifier,
+		state:              state,
+		chainState:         chainState,
+		chainSelector:      chainSelector,
+		fork:               fork,
+		config:             config,
+		gasPirceSchedule:   gasPirceSchedule,
+		validateBlockCache: validateBlockCache,
+		blsSigCache:        blsSigCache,
+		msgCache:           msgCache,
 	}
 }
 
@@ -94,7 +105,17 @@ func (bv *BlockValidator) ValidateBlockHeader(ctx context.Context, blk *block.Bl
 }
 
 func (bv *BlockValidator) ValidateFullBlock(ctx context.Context, blk *block.Block) error {
-	return bv.validateBlock(ctx, blk, true)
+	if val, ok := bv.validateBlockCache.Get(blk.Cid()); ok {
+		if val == nil {
+			return nil
+		} else {
+			return val.(error)
+		}
+	} else {
+		err := bv.validateBlock(ctx, blk, true)
+		bv.validateBlockCache.Add(blk.Cid(), err)
+		return err
+	}
 }
 
 func (bv *BlockValidator) validateBlock(ctx context.Context, blk *block.Block, includeMsg bool) error {
@@ -187,11 +208,18 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *block.Block, i
 
 	blockSigCheck := async.Err(func() error {
 		// Validate block signature
-		if err := crypto.ValidateSignature(blk.SignatureData(), workerAddr, *blk.BlockSig); err != nil {
-			return xerrors.Errorf("block signature invalid %w", err)
+		key := blk.Cid().String()
+		if val, ok := bv.blsSigCache.Get(key); ok {
+			if val == nil {
+				return nil
+			} else {
+				return val.(error)
+			}
+		} else {
+			err := crypto.ValidateSignature(blk.SignatureData(), workerAddr, *blk.BlockSig)
+			bv.blsSigCache.Add(key, err)
+			return err
 		}
-
-		return nil
 	})
 
 	beaconValuesCheck := async.Err(func() error {
@@ -561,7 +589,19 @@ func (bv *BlockValidator) VerifyWinningPoStProof(ctx context.Context, nv network
 }
 
 // TODO: We should extract this somewhere else and make the message pool and miner use the same logic
-func (bv *BlockValidator) checkBlockMessages(ctx context.Context, sigValidator *appstate.SignatureValidator, blk *block.Block, baseTs *block.TipSet) error {
+func (bv *BlockValidator) checkBlockMessages(ctx context.Context, sigValidator *appstate.SignatureValidator, blk *block.Block, baseTs *block.TipSet) (err error) {
+	if val, ok := bv.msgCache.Get(blk.Cid()); ok {
+		if val == nil {
+			return nil
+		} else {
+			return val.(error)
+		}
+	}
+	//set cache
+	defer func() {
+		bv.msgCache.Add(blk.Cid(), err)
+	}()
+
 	blksecpMsgs, blkblsMsgs, err := bv.messageStore.LoadMetaMessages(ctx, blk.Messages)
 	if err != nil {
 		return xerrors.Errorf("failed loading message list %s for block %s %v", blk.Messages, blk.Cid(), err)
