@@ -321,7 +321,7 @@ func (syncer *Syncer) HandleNewTipSet(ctx context.Context, target *syncTypes.Tar
 		return xerrors.New("do not sync to a target has synced before")
 	}
 
-	tipsets, err := syncer.fetchChainBlocks(ctx, head, target.Head.Key())
+	tipsets, err := syncer.fetchChainBlocks(ctx, head, target.Head)
 	if err != nil {
 		return errors.Wrapf(err, "failure fetching or validating headers")
 	}
@@ -375,7 +375,6 @@ func (syncer *Syncer) syncSegement(ctx context.Context, target *syncTypes.Target
 			}
 			errProcessChan <- nil
 		}()
-
 		return nil
 	}); err != nil {
 		return err
@@ -390,9 +389,8 @@ func (syncer *Syncer) syncSegement(ctx context.Context, target *syncTypes.Target
 	}
 }
 
-func (syncer *Syncer) fetchChainBlocks(ctx context.Context, knownTip *block.TipSet, targetTip block.TipSetKey) ([]*block.TipSet, error) {
-	var chainTipsets []*block.TipSet
-
+func (syncer *Syncer) fetchChainBlocks(ctx context.Context, knownTip *block.TipSet, targetTip *block.TipSet) ([]*block.TipSet, error) {
+	chainTipsets := []*block.TipSet{targetTip}
 	var flushDb = func(saveTips []*block.TipSet) error {
 		bs := bstore.NewTemporary()
 		cborStore := cbor.NewCborStore(bs)
@@ -407,23 +405,27 @@ func (syncer *Syncer) fetchChainBlocks(ctx context.Context, knownTip *block.TipS
 		return blockstoreutil.CopyBlockstore(ctx, bs, syncer.bsstore)
 	}
 
-	var windows = 500
 	untilHeight := knownTip.EnsureHeight()
 	count := 0
 loop:
-	for len(chainTipsets) == 0 || chainTipsets[len(chainTipsets)-1].EnsureHeight() > untilHeight {
-		tipset, err := syncer.chainStore.GetTipSet(targetTip)
+	for chainTipsets[len(chainTipsets)-1].EnsureHeight() > untilHeight {
+		tipSet, err := syncer.chainStore.GetTipSet(targetTip.EnsureParents())
 		if err == nil {
-			chainTipsets = append(chainTipsets, tipset)
-			targetTip = tipset.EnsureParents()
+			chainTipsets = append(chainTipsets, tipSet)
+			targetTip = tipSet
 			count++
 			if count%500 == 0 {
-				logSyncer.Info("load from local db ", "Height: ", tipset.EnsureHeight())
+				logSyncer.Info("load from local db ", "Height: ", tipSet.EnsureHeight())
 			}
 			continue
 		}
 
-		fetchHeaders, err := syncer.exchangeClient.GetBlocks(ctx, targetTip, windows)
+		windows := targetTip.EnsureHeight() - untilHeight
+		if windows > 500 {
+			windows = 500
+		}
+
+		fetchHeaders, err := syncer.exchangeClient.GetBlocks(ctx, targetTip.EnsureParents(), int(windows))
 		if err != nil {
 			return nil, err
 		}
@@ -432,7 +434,7 @@ loop:
 			break loop
 		}
 
-		logSyncer.Infof("fetch  blocks %d height from %d-%d", len(fetchHeaders), fetchHeaders[0].EnsureHeight(), fetchHeaders[len(fetchHeaders)-1].EnsureHeight())
+		logSyncer.Infof("fetch blocks %d height from %d-%d", len(fetchHeaders), fetchHeaders[0].EnsureHeight(), fetchHeaders[len(fetchHeaders)-1].EnsureHeight())
 		if err = flushDb(fetchHeaders); err != nil {
 			return nil, err
 		}
@@ -441,12 +443,7 @@ loop:
 				break loop
 			}
 			chainTipsets = append(chainTipsets, b)
-			targetTip = b.EnsureParents()
 		}
-	}
-
-	if len(chainTipsets) == 0 {
-		return nil, xerrors.Errorf("sync chain store has no tipset %s", targetTip.String())
 	}
 
 	base := chainTipsets[len(chainTipsets)-1]
@@ -723,9 +720,7 @@ func RangeProcess(ts []*block.TipSet, cb func(ts []*block.TipSet) error) (err er
 			}
 			ts = ts[maxProcessLen:]
 		}
+		logSyncer.Infof("Sync Process End,Remaining: %v, err: %v ...", len(ts), err)
 	}
-
-	logSyncer.Infof("Sync Process End,Remaining: %v, err: %v ...", len(ts), err)
-
 	return err
 }
