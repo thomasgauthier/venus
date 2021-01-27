@@ -585,10 +585,6 @@ func (bv *BlockValidator) VerifyWinningPoStProof(ctx context.Context, nv network
 
 // TODO: We should extract this somewhere else and make the message pool and miner use the same logic
 func (bv *BlockValidator) checkBlockMessages(ctx context.Context, sigValidator *appstate.SignatureValidator, blk *block.Block, baseTs *block.TipSet) (err error) {
-	if _, ok := bv.msgCache.Get(blk.Cid()); ok {
-		return nil
-	}
-
 	blksecpMsgs, blkblsMsgs, err := bv.messageStore.LoadMetaMessages(ctx, blk.Messages)
 	if err != nil {
 		return xerrors.Errorf("failed loading message list %s for block %s %v", blk.Messages, blk.Cid(), err)
@@ -702,7 +698,6 @@ func (bv *BlockValidator) checkBlockMessages(ctx context.Context, sigValidator *
 	if blk.Messages != b.Cid() {
 		return fmt.Errorf("messages didnt match message root in header")
 	}
-	bv.msgCache.Add(blk.Cid(), struct{}{})
 	return nil
 }
 
