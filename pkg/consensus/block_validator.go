@@ -61,9 +61,8 @@ type BlockValidator struct {
 	config           *config.NetworkParamsConfig
 	gasPirceSchedule *gas.PricesSchedule
 
-	validateBlockCache *lru.ARCCache
-	blsSigCache        *lru.ARCCache
-	msgCache           *lru.ARCCache
+	validateBlockCache  *lru.ARCCache
+	validateHeaderCache *lru.ARCCache
 }
 
 func NewBlockValidator(tv TicketValidator,
@@ -79,29 +78,27 @@ func NewBlockValidator(tv TicketValidator,
 	config *config.NetworkParamsConfig,
 	gasPirceSchedule *gas.PricesSchedule) *BlockValidator {
 	validateBlockCache, _ := lru.NewARC(2048)
-	blsSigCache, _ := lru.NewARC(2048)
-	msgCache, _ := lru.NewARC(2048)
+	validateHeaderCache, _ := lru.NewARC(2048)
 	return &BlockValidator{
-		tv:                 tv,
-		bstore:             bstore,
-		messageStore:       messageStore,
-		drand:              drand,
-		cstore:             cstore,
-		proofVerifier:      proofVerifier,
-		state:              state,
-		chainState:         chainState,
-		chainSelector:      chainSelector,
-		fork:               fork,
-		config:             config,
-		gasPirceSchedule:   gasPirceSchedule,
-		validateBlockCache: validateBlockCache,
-		blsSigCache:        blsSigCache,
-		msgCache:           msgCache,
+		tv:                  tv,
+		bstore:              bstore,
+		messageStore:        messageStore,
+		drand:               drand,
+		cstore:              cstore,
+		proofVerifier:       proofVerifier,
+		state:               state,
+		chainState:          chainState,
+		chainSelector:       chainSelector,
+		fork:                fork,
+		config:              config,
+		gasPirceSchedule:    gasPirceSchedule,
+		validateBlockCache:  validateBlockCache,
+		validateHeaderCache: validateHeaderCache,
 	}
 }
 
 func (bv *BlockValidator) ValidateBlockHeader(ctx context.Context, blk *block.Block) error {
-	return bv.validateBlock(ctx, blk, false)
+	return bv.validateBlock(ctx, blk)
 }
 
 func (bv *BlockValidator) ValidateFullBlock(ctx context.Context, blk *block.Block) (err error) {
@@ -113,19 +110,34 @@ func (bv *BlockValidator) ValidateFullBlock(ctx context.Context, blk *block.Bloc
 	if _, ok := bv.validateBlockCache.Get(blk.Cid()); ok {
 		return nil
 	}
-	err = bv.validateBlock(ctx, blk, true)
+
+	err = bv.validateBlock(ctx, blk)
+	//validate message
+	parent, err := bv.chainState.GetTipSet(blk.Parents)
+	if err != nil {
+		return xerrors.Errorf("load parent tipset failed %w", err)
+	}
+	keyStateView := bv.state.PowerStateView(blk.ParentStateRoot)
+	sigValidator := appstate.NewSignatureValidator(keyStateView)
+	if err := bv.checkBlockMessages(ctx, sigValidator, blk, parent); err != nil {
+		return xerrors.Errorf("block had invalid messages: %w", err)
+	}
+
 	if err == nil {
 		bv.validateBlockCache.Add(blk.Cid(), struct{}{})
 	}
 	return err
 }
 
-func (bv *BlockValidator) validateBlock(ctx context.Context, blk *block.Block, includeMsg bool) error {
+func (bv *BlockValidator) validateBlock(ctx context.Context, blk *block.Block) error {
+	if _, ok := bv.validateHeaderCache.Get(blk.Cid()); ok {
+		return nil
+	}
+
 	parent, err := bv.chainState.GetTipSet(blk.Parents)
 	if err != nil {
 		return xerrors.Errorf("load parent tipset failed %w", err)
 	}
-
 	parentWeight, err := bv.chainSelector.Weight(ctx, parent)
 	if err != nil {
 		return xerrors.Errorf("calc parent weight failed %w", err)
@@ -210,18 +222,7 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *block.Block, i
 
 	blockSigCheck := async.Err(func() error {
 		// Validate block signature
-		key := blk.Cid().String()
-		if val, ok := bv.blsSigCache.Get(key); ok {
-			if val == nil {
-				return nil
-			} else {
-				return val.(error)
-			}
-		} else {
-			err := crypto.ValidateSignature(blk.SignatureData(), workerAddr, *blk.BlockSig)
-			bv.blsSigCache.Add(key, err)
-			return err
-		}
+		return crypto.ValidateSignature(blk.SignatureData(), workerAddr, *blk.BlockSig)
 	})
 
 	beaconValuesCheck := async.Err(func() error {
@@ -261,14 +262,6 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *block.Block, i
 		return nil
 	})
 
-	keyStateView := bv.state.PowerStateView(rootAfterCalc)
-	sigValidator := appstate.NewSignatureValidator(keyStateView)
-	msgsCheck := async.Err(func() error {
-		if err := bv.checkBlockMessages(ctx, sigValidator, blk, parent); err != nil {
-			return xerrors.Errorf("block had invalid messages: %w", err)
-		}
-		return nil
-	})
 	await := []async.ErrorFuture{
 		minerCheck,
 		tktsCheck,
@@ -277,10 +270,6 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *block.Block, i
 		wproofCheck,
 		winnerCheck,
 		baseFeeCheck,
-	}
-
-	if includeMsg {
-		await = append(await, msgsCheck)
 	}
 
 	var merr error
@@ -307,6 +296,10 @@ func (bv *BlockValidator) validateBlock(ctx context.Context, blk *block.Block, i
 				len(es), strings.Join(points, "\n\t"))
 		}
 		return mulErr
+	}
+
+	if err == nil {
+		bv.validateHeaderCache.Add(blk.Cid(), struct{}{})
 	}
 	return nil
 }
